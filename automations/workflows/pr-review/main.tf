@@ -34,6 +34,17 @@ resource "cursor_platform_workflow" "this" {
   prompt                = var.prompt
   environment_public_id = var.environment_id
 
+  # Grok 4.6 defaults to effort = high and fast = true, so both must be explicit.
+  # max_mode is always reported back as true; leaving it unset fails the apply.
+  model_selection = {
+    model_id = "grok-4.6"
+    max_mode = true
+    parameters = [
+      { id = "effort", value = "medium" },
+      { id = "fast", value = "false" },
+    ]
+  }
+
   trigger = [{
     git_pull_request = {
       repos            = [var.repo]

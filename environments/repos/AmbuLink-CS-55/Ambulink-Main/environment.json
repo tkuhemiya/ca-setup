@@ -1,3 +1,6 @@
 {
-  "install": "npm install -g npm@11.8.0 && npm ci"
+  "install": [
+    "npm install -g npm@11.8.0",
+    "npm ci"
+  ]
 }

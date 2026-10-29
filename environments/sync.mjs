@@ -44,9 +44,12 @@ function repoNames() {
 // Commands are sent base64-wrapped: Cursor re-quotes them, which breaks commands containing quotes.
 const inline = (script) => `echo ${Buffer.from(script).toString("base64")} | base64 -d | bash`;
 
+// A repo's install/start is a string or an array of lines; lines run as one script that stops at the first failure.
+const script = (own) => (Array.isArray(own) ? ["set -euo pipefail", ...own].join("\n") : own);
+
 // Runs the shared script, then the repo's own commands (if any) as a separate step.
 const withShared = (sharedScript, own, separator) =>
-  [inline(readText(sharedScript)), own && inline(own)].filter(Boolean).join(separator);
+  [inline(readText(sharedScript)), own && inline(script(own))].filter(Boolean).join(separator);
 
 // repos/<owner>/<repo>/environment.json is sent as-is, with the shared setup run before its commands.
 function environmentJson(repo) {

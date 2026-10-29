@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs on every Cloud Agent boot (the environment `start` command), when runtime secrets exist.
-# Registers the Langfuse hooks in this checkout only, and hides them from git. Never fatal.
+# Re-registers the Langfuse hooks (install.sh already did at build time) and writes the keys file. Never fatal.
 set -uo pipefail
 
 root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"

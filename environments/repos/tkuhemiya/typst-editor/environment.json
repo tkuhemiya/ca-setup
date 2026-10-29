@@ -1,3 +1,6 @@
 {
-  "install": "npm install -g bun && bun install --frozen-lockfile"
+  "install": [
+    "npm install -g bun",
+    "bun install --frozen-lockfile"
+  ]
 }
