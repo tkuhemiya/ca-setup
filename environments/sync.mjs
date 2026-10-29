@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// Creates or updates a Cursor Cloud Agent environment for every repo folder under environments/
-// (environments/<host>/<owner>/<repo>/Dockerfile), sets the Langfuse secrets, and starts a build.
-// Safe to re-run. Needs Node 20.6+, no packages.
+// Creates or updates a Cursor Cloud Agent environment for every repos/<owner>/<repo>/Dockerfile,
+// sets the Langfuse secrets, starts a build, and records the environment ids in ids.json
+// (read by automations/main.tf). Safe to re-run. Needs Node 20.6+, no packages.
 //
 //   node --env-file=.env environments/sync.mjs [owner/repo] [--dry-run] [--no-build]
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -21,7 +21,7 @@ const only = positionals[0];
 const readText = (path) => readFileSync(ROOT + path, "utf8");
 const readJson = (path) => JSON.parse(readText(path));
 
-const langfuse = readJson("langfuse.json");
+const langfuse = readJson("shared/langfuse.json");
 
 const secrets = [
   // Runtime secrets are redacted from agent output; plain env vars are not.
@@ -30,19 +30,19 @@ const secrets = [
   ...Object.entries(langfuse.env).map(([name, value]) => ({ name, value, type: "environment_variable" })),
 ];
 
-// "github.com/owner/repo" for every folder holding a Dockerfile.
-function repoFolders() {
-  return readdirSync(ROOT, { recursive: true })
+// "owner/repo" for every repos/ folder holding a Dockerfile.
+function repoNames() {
+  return readdirSync(ROOT + "repos", { recursive: true })
     .filter((path) => path.endsWith("/Dockerfile"))
     .map((path) => dirname(path))
-    .filter((folder) => !only || folder.endsWith(`/${only}`));
+    .filter((repo) => !only || repo === only);
 }
 
 // An inline Dockerfile can't COPY, so the Langfuse hook CLI and start script are added as layers.
-function dockerfile(folder) {
-  const startScript = Buffer.from(readText("langfuse-start.sh")).toString("base64");
+function dockerfile(repo) {
+  const startScript = Buffer.from(readText("shared/langfuse-start.sh")).toString("base64");
   return [
-    readText(`${folder}/Dockerfile`).trimEnd(),
+    readText(`repos/${repo}/Dockerfile`).trimEnd(),
     `RUN sudo npm install -g @langfuse/cursor-observability-plugin`,
     `RUN echo ${startScript} | base64 -d | sudo tee /usr/local/bin/langfuse-start.sh > /dev/null \\`,
     ` && sudo chmod +x /usr/local/bin/langfuse-start.sh`,
@@ -50,14 +50,15 @@ function dockerfile(folder) {
   ].join("\n");
 }
 
-// Optional environments/<host>/<owner>/<repo>/environment.json adds repo-specific install, terminals, ...
-function environmentJson(folder) {
-  const extras = existsSync(`${ROOT}${folder}/environment.json`) ? readJson(`${folder}/environment.json`) : {};
+// Optional repos/<owner>/<repo>/environment.json adds repo-specific install, terminals, ...
+function environmentJson(repo) {
+  const path = `repos/${repo}/environment.json`;
+  const extras = existsSync(ROOT + path) ? readJson(path) : {};
   return JSON.stringify({
     ...extras,
     start: "bash /usr/local/bin/langfuse-start.sh",
     egressAllowlist: [langfuse.host],
-    build: { dockerfileContents: dockerfile(folder) },
+    build: { dockerfileContents: dockerfile(repo) },
   });
 }
 
@@ -89,12 +90,11 @@ async function upsertEnvironment(name, repoUrl, environmentJson) {
   return created.id;
 }
 
-async function syncRepo(folder) {
-  const [, owner, repo] = folder.split("/");
-  console.log(`\n${owner}/${repo}`);
+async function syncRepo(repo) {
+  console.log(`\n${repo}`);
 
-  const id = await upsertEnvironment(`agents-${owner}-${repo}`, `https://${folder}`, environmentJson(folder));
-  console.log(`  environment id: ${id}   <- use as environment_id in automations/main.tf`);
+  const id = await upsertEnvironment(`agents-${repo.replace("/", "-")}`, `https://github.com/${repo}`, environmentJson(repo));
+  console.log(`  environment id: ${id}`);
 
   for (const { name, value, type } of secrets) {
     await api("PUT", `/v1/environments/${id}/secrets/${name}`, { value, type });
@@ -105,11 +105,12 @@ async function syncRepo(folder) {
     const build = await api("POST", `/v1/environments/${id}/builds`);
     console.log(`  build started: ${build.id}`);
   }
+  return id;
 }
 
 if (flags["dry-run"]) {
-  const [first] = repoFolders();
-  console.log("Would sync:", repoFolders().join(", "));
+  const [first] = repoNames();
+  console.log("Would sync:", repoNames().join(", "));
   console.log(`\nenvironmentJson for ${first}:`, JSON.stringify(JSON.parse(environmentJson(first)), null, 2));
   process.exit(0);
 }
@@ -117,4 +118,10 @@ if (flags["dry-run"]) {
 for (const key of ["CURSOR_TOKEN", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"]) {
   if (!process.env[key]) throw new Error(`Missing ${key} (see .env.example)`);
 }
-for (const folder of repoFolders()) await syncRepo(folder);
+
+// Merge, so syncing a single repo keeps the other ids.
+const ids = existsSync(ROOT + "ids.json") ? readJson("ids.json") : {};
+for (const repo of repoNames()) {
+  ids[repo] = await syncRepo(repo);
+  writeFileSync(ROOT + "ids.json", JSON.stringify(ids, Object.keys(ids).sort(), 2) + "\n");
+}

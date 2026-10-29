@@ -9,7 +9,7 @@ cd "$root" || exit 0
 # Reads LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL from the environment.
 langfuse-cursor-hook setup --project . --hooks || echo "langfuse setup failed; agent runs untraced" >&2
 
-# Local-only ignore (not shared, unlike .gitignore).
+# Local-only ignore
 mkdir -p .git/info
 grep -qxF '.cursor/' .git/info/exclude 2>/dev/null || echo '.cursor/' >> .git/info/exclude
 exit 0
