@@ -24,8 +24,8 @@ variable "environment_id" {
 
 variable "allowed_users" {
   type        = list(string)
-  default     = []
-  description = "Git usernames allowed to trigger. Empty = anyone."
+  default     = null # not [], the provider (0.8) reads an empty list back as null and fails the apply
+  description = "Git usernames allowed to trigger. Null = anyone."
 }
 
 resource "cursor_platform_workflow" "this" {

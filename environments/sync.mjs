@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Creates or updates a Cursor Cloud Agent environment for every repos/<owner>/<repo>/Dockerfile,
+// Creates or updates a Cursor Cloud Agent environment for every repos/<owner>/<repo>/environment.json,
 // sets the Langfuse secrets, starts a build, and records the environment ids in ids.json
 // (read by automations/main.tf). Safe to re-run. Needs Node 20.6+, no packages.
 //
@@ -10,6 +10,8 @@ import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 
 const API = "https://api.cursor.com";
+// "team" needs a key on a Cursor team (e.g. a service account); "personal" works for any key.
+const OWNER = process.env.CURSOR_ENVIRONMENT_OWNER || "team";
 const ROOT = new URL("./", import.meta.url).pathname;
 
 const { values: flags, positionals } = parseArgs({
@@ -21,44 +23,38 @@ const only = positionals[0];
 const readText = (path) => readFileSync(ROOT + path, "utf8");
 const readJson = (path) => JSON.parse(readText(path));
 
-const langfuse = readJson("shared/langfuse.json");
+// Plain env vars for the Langfuse hooks; the keys come from .env as runtime secrets.
+const langfuseEnv = readJson("shared/langfuse.json");
 
 const secrets = [
   // Runtime secrets are redacted from agent output; plain env vars are not.
   { name: "LANGFUSE_PUBLIC_KEY", value: process.env.LANGFUSE_PUBLIC_KEY, type: "runtime_secret" },
   { name: "LANGFUSE_SECRET_KEY", value: process.env.LANGFUSE_SECRET_KEY, type: "runtime_secret" },
-  ...Object.entries(langfuse.env).map(([name, value]) => ({ name, value, type: "environment_variable" })),
+  ...Object.entries(langfuseEnv).map(([name, value]) => ({ name, value, type: "environment_variable" })),
 ];
 
-// "owner/repo" for every repos/ folder holding a Dockerfile.
+// "owner/repo" for every repos/ folder holding an environment.json.
 function repoNames() {
   return readdirSync(ROOT + "repos", { recursive: true })
-    .filter((path) => path.endsWith("/Dockerfile"))
+    .filter((path) => path.endsWith("/environment.json"))
     .map((path) => dirname(path))
     .filter((repo) => !only || repo === only);
 }
 
-// An inline Dockerfile can't COPY, so the Langfuse hook CLI and start script are added as layers.
-function dockerfile(repo) {
-  const startScript = Buffer.from(readText("shared/langfuse-start.sh")).toString("base64");
-  return [
-    readText(`repos/${repo}/Dockerfile`).trimEnd(),
-    `RUN sudo npm install -g @langfuse/cursor-observability-plugin`,
-    `RUN echo ${startScript} | base64 -d | sudo tee /usr/local/bin/langfuse-start.sh > /dev/null \\`,
-    ` && sudo chmod +x /usr/local/bin/langfuse-start.sh`,
-    ``,
-  ].join("\n");
-}
+// Commands are sent base64-wrapped: Cursor re-quotes them, which breaks commands containing quotes.
+const inline = (script) => `echo ${Buffer.from(script).toString("base64")} | base64 -d | bash`;
 
-// Optional repos/<owner>/<repo>/environment.json adds repo-specific install, terminals, ...
+// Runs the shared script, then the repo's own commands (if any) as a separate step.
+const withShared = (sharedScript, own, separator) =>
+  [inline(readText(sharedScript)), own && inline(own)].filter(Boolean).join(separator);
+
+// repos/<owner>/<repo>/environment.json is sent as-is, with the shared setup run before its commands.
 function environmentJson(repo) {
-  const path = `repos/${repo}/environment.json`;
-  const extras = existsSync(ROOT + path) ? readJson(path) : {};
+  const { install, start, ...rest } = readJson(`repos/${repo}/environment.json`);
   return JSON.stringify({
-    ...extras,
-    start: "bash /usr/local/bin/langfuse-start.sh",
-    egressAllowlist: [langfuse.host],
-    build: { dockerfileContents: dockerfile(repo) },
+    ...rest,
+    install: withShared("shared/install.sh", install, " && "), // build fails if either fails
+    start: withShared("shared/langfuse-start.sh", start, "; "), // Langfuse setup never blocks the repo's start
   });
 }
 
@@ -74,7 +70,7 @@ async function api(method, path, body) {
 }
 
 async function upsertEnvironment(name, repoUrl, environmentJson) {
-  const { items = [] } = await api("GET", `/v1/environments?owner=team&query=${encodeURIComponent(name)}`);
+  const { items = [] } = await api("GET", `/v1/environments?owner=${OWNER}&query=${encodeURIComponent(name)}`);
   const existing = items.find((environment) => environment.name === name);
 
   if (existing) {
@@ -82,7 +78,7 @@ async function upsertEnvironment(name, repoUrl, environmentJson) {
     return existing.id;
   }
   const created = await api("POST", "/v1/environments", {
-    owner: "team",
+    owner: OWNER,
     name,
     repos: [{ url: repoUrl }],
     environmentJson,
