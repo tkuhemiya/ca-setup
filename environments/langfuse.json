@@ -1,0 +1,11 @@
+{
+  "host": "cloud.langfuse.com",
+  "env": {
+    "LANGFUSE_BASE_URL": "https://cloud.langfuse.com",
+    "LANGFUSE_TRACING_ENVIRONMENT": "cloud-agent",
+    "LANGFUSE_TAGS": "automation",
+    "LANGFUSE_CURSOR_CAPTURE_TOOL_OUTPUT": "true",
+    "LANGFUSE_CURSOR_CAPTURE_FILE_CONTENT": "false",
+    "LANGFUSE_CURSOR_MAX_CHARS": "20000"
+  }
+}
