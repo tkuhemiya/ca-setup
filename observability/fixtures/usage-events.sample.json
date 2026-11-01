@@ -1,0 +1,53 @@
+{
+  "totalUsageEventsCount": 3,
+  "pagination": { "numPages": 1, "currentPage": 1, "pageSize": 1000, "hasNextPage": false, "hasPreviousPage": false },
+  "usageEvents": [
+    {
+      "timestamp": "1793300430000",
+      "userEmail": "you@example.com",
+      "cloudAgentId": "bc-766a3af8-4539-4eb1-8dc8-240ab95fe4b4",
+      "automationId": "f7856b33-d3bb-11f1-89ee-7aa6f0729b11",
+      "conversationId": "bc-766a3af8-4539-4eb1-8dc8-240ab95fe4b4",
+      "model": "grok-4.6",
+      "kind": "Usage-based",
+      "maxMode": false,
+      "isHeadless": true,
+      "requestsCosts": 1,
+      "isTokenBasedCall": true,
+      "isChargeable": true,
+      "tokenUsage": { "inputTokens": 48000, "outputTokens": 2100, "cacheWriteTokens": 0, "cacheReadTokens": 30000, "totalCents": 4.1, "discountPercentOff": 0 },
+      "chargedCents": 4.1
+    },
+    {
+      "timestamp": "1793300470000",
+      "userEmail": "you@example.com",
+      "cloudAgentId": "bc-766a3af8-4539-4eb1-8dc8-240ab95fe4b4",
+      "automationId": "f7856b33-d3bb-11f1-89ee-7aa6f0729b11",
+      "conversationId": "bc-subagent-example",
+      "model": "grok-4.6",
+      "kind": "Usage-based",
+      "maxMode": false,
+      "isHeadless": true,
+      "requestsCosts": 1,
+      "isTokenBasedCall": true,
+      "isChargeable": true,
+      "tokenUsage": { "inputTokens": 12000, "outputTokens": 900, "cacheWriteTokens": 0, "cacheReadTokens": 8000, "totalCents": 1.2, "discountPercentOff": 0 },
+      "chargedCents": 1.2
+    },
+    {
+      "timestamp": "1793300500000",
+      "userEmail": "you@example.com",
+      "cloudAgentId": "bc-not-traced-example",
+      "automationId": "f7856b33-d3bb-11f1-89ee-7aa6f0729b11",
+      "model": "grok-4.6",
+      "kind": "Usage-based",
+      "maxMode": false,
+      "isHeadless": true,
+      "requestsCosts": 1,
+      "isTokenBasedCall": true,
+      "isChargeable": true,
+      "tokenUsage": { "inputTokens": 1000, "outputTokens": 100, "cacheWriteTokens": 0, "cacheReadTokens": 0, "totalCents": 0.1, "discountPercentOff": 0 },
+      "chargedCents": 0.1
+    }
+  ]
+}
