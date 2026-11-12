@@ -1,8 +1,4 @@
 {
   "LANGFUSE_BASE_URL": "https://jp.cloud.langfuse.com",
-  "LANGFUSE_TRACING_ENVIRONMENT": "cloud-agent",
-  "LANGFUSE_TAGS": "automation",
-  "LANGFUSE_CURSOR_CAPTURE_TOOL_OUTPUT": "true",
-  "LANGFUSE_CURSOR_CAPTURE_FILE_CONTENT": "false",
-  "LANGFUSE_CURSOR_MAX_CHARS": "20000"
+  "AGENT_TRACE_ENVIRONMENT": "cloud-agent"
 }

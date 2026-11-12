@@ -156,6 +156,21 @@ They show the loop worth copying:
 
 **Finding:** still no way to get the prompt, replies or usage into a cloud hook. Cursor's agent API, read from outside the agent, stays the source. The stream holds more than we use.
 
+### 10. Subagents and live streaming (tested 2026-11-08)
+
+One run on a throwaway agent against `tkuhemiya/typst-editor`, in Cursor's default environment (no hooks), `grok-4.6` medium. The prompt told it to call a custom subagent, `counter`, twice, read-only. The agent was `bc-c5388057-ea7f-44fa-8760-1cce3172d19b`, 42 seconds, 147,951 tokens, 14.6 cents raw cost, 0 charged. No branch was pushed. The raw stream, usage and conversation are in `/tmp/subagent-probe/` and will not survive a reboot.
+
+- **A subagent call is a `task` tool call in the parent's stream.** Its `tool-call-completed` event carries `result.value.conversationSteps`: the subagent's thinking (with `startedAtMs` and `completedAtMs`), its tool calls with arguments and results, and its messages. `result.value` also has the subagent's `agentId`, `durationMs` and `isBackground`. `export.mjs` does not read any of this yet.
+- **The detail arrives when the subagent finishes.** While it runs, the stream only has `task` with status `running`. No separate tool-call events for the subagent's own calls were seen. Its thinking deltas were not checked.
+- **Each subagent is its own agent.** `GET /v1/agents/<subagent id>` and `GET /v0/agents/<subagent id>/conversation` both answer (status `IDLE`, the subagent's prompt as the user message). `GET /v1/agents/<subagent id>/usage` returns zeros with no runs. The parent's usage is one total, almost certainly including the subagents, but it can't be split.
+- **The stream works on a running run.** The stream file grew while the run was `RUNNING` (27 KB after 9 seconds, 139 KB at the end), so a process on the agent's machine can write spans as steps finish.
+- **The stream has event types beyond `interaction_update`.** `assistant`, `thinking`, `tool_call`, `status` and `result` also appear. `result` carries the final text, `durationMs` and the run's git branches. `export.mjs` reads `result` from the run object instead.
+- **Not tested:** what hooks do in a run with subagents, including whether a subagent's `stop` fires with the parent's `conversation_id` (`stop-hook.mjs` would then try to export a run that doesn't exist).
+
+**Finding:** subagent thinking, tool calls and messages can be had from the parent's stream or from the subagent's own conversation. Only tokens and cost stay per run.
+
+**Read-only key:** the owner reports that Teams and Enterprise plans can issue a read-only Cursor key. We haven't seen one. If it can read `/stream`, `/usage` and `/conversation` and gets 403 on `POST /v1/agents`, option D below no longer needs an Admin key on the machine.
+
 ## Options compared
 
 | Option | Full traces | Key on agent machine | Moving parts |
@@ -172,6 +187,7 @@ Go with **B**: our own small `stop` hook sends only the run id and model to an o
 
 ## Open items
 
-- Choose the outside service and how the hook authenticates to it without carrying a Cursor key.
+- Choose the outside service and how the hook authenticates to it without carrying a Cursor key. A verified read-only key (section 10) would change this, because option D would then be safe.
+- Teach `export.mjs` to write subagent spans from `conversationSteps`, and test in the `dummy` environment whether Langfuse shows child spans before their root arrives.
 - Delete or reuse the `agents-test-probe` environment.
 - Filter out the test environments `cloud-agent-api`, `cursor-runs`, `probe` and `dummy` in Langfuse.

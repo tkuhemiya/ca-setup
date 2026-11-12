@@ -117,32 +117,70 @@ function promptIndex() {
   return index;
 }
 
-// Model calls ("steps") with their thinking and text, and the tool calls made in each.
+// Model calls with their thinking and text, and the tool calls each one made. The stream has no marker
+// for a call, so a call is whatever falls between two closing events: `tool-requests-listed` (the call
+// ended by asking for tools) or `turn-ended` (it ended by answering). A call starts when its input is
+// ready, which is the run start for the first call and the last tool result for the rest, so the time to
+// the first token counts as part of the call. Every tool call carries the id of the model call that
+// requested it ("call-<uuid>-<n>"), and those groups first appear in the same order as the calls that
+// asked for tools, so that's how tools find their call. `tool_call` events also include calls the typed
+// events leave out, such as the built-in `get_mcp_tools`.
 function steps(events) {
   const all = [];
   const calls = new Map();
   let step;
+  let ready;
+  let toolsDone = 0;
+
+  const begin = (ms) => {
+    step ??= all[all.push({ start: Math.min(Math.max(ready ?? ms, toolsDone), ms), end: ms, thinking: "", text: "", tools: [] }) - 1];
+    return step;
+  };
+  const close = (ms, requestedTools) => {
+    begin(ms).end = ms;
+    step.requestedTools = requestedTools;
+    step = undefined;
+    ready = ms;
+  };
+  const call = (id, ms) => {
+    if (!calls.has(id)) calls.set(id, { group: id.split("\n")[0].replace(/-\d+$/, ""), start: ms });
+    const known = calls.get(id);
+    known.end = ms;
+    toolsDone = Math.max(toolsDone, ms);
+    return known;
+  };
+
   for (const { type, ms, data } of events) {
-    if (type !== "interaction_update") continue;
-    if (data.type === "step-started") {
-      step = { start: ms, end: ms, thinking: "", text: "", tools: [] };
-      all.push(step);
-    } else if (!step) {
+    if (type === "tool_call") {
+      call(data.callId, ms).raw = data;
+    } else if (type !== "interaction_update") {
       continue;
+    } else if (data.type === "step-started") {
+      ready = ms;
     } else if (data.type === "thinking-delta") {
-      step.thinking += data.text;
+      const current = begin(ms);
+      current.firstToken ??= ms;
+      current.thinking += data.text;
     } else if (data.type === "text-delta") {
-      step.text += data.text;
-    } else if (data.type === "step-completed") {
-      step.end = ms;
-    } else if (data.type === "tool-call-started") {
-      const call = { start: ms, end: ms, ...data.toolCall };
-      calls.set(data.callId, call);
-      step.tools.push(call);
-    } else if (data.type === "tool-call-completed") {
-      Object.assign(calls.get(data.callId) ?? {}, { end: ms, ...data.toolCall });
+      const current = begin(ms);
+      current.firstToken ??= ms;
+      current.text += data.text;
+    } else if (data.type === "thinking-completed") {
+      begin(ms).thinkingMs = data.thinkingDurationMs;
+    } else if (data.type === "tool-requests-listed") {
+      close(ms, true);
+    } else if (data.type === "turn-ended") {
+      close(ms, false);
+    } else if (data.type === "tool-call-started" || data.type === "tool-call-completed") {
+      Object.assign(call(data.callId, ms), data.toolCall);
     }
   }
+  if (step) close(events.at(-1).ms, false);
+
+  const groups = new Map();
+  for (const known of calls.values()) groups.set(known.group, [...(groups.get(known.group) ?? []), known]);
+  const requesting = all.filter((s) => s.requestedTools);
+  [...groups.values()].forEach((group, i) => (requesting[i] ?? all.at(-1))?.tools.push(...group));
   return all;
 }
 
@@ -164,6 +202,22 @@ const hash = (text, length) => createHash("sha256").update(text).digest("hex").s
 // Includes the environment, so a test export can never reuse a real trace's ids: Langfuse keeps both
 // writes to an id and shows either. Also differs from the plugin's sha256("cursor:<run id>:1").
 const traceIdFor = (runId) => hash(`cursor-run:${flags.environment}:${runId}`, 32);
+
+// A tool call as the trace shows it. Calls the typed events leave out (get_mcp_tools) only have the raw `tool_call` event.
+function toolView(call) {
+  const type = call.type ?? call.raw?.name;
+  const args = call.args ?? call.raw?.args;
+  const result = call.result ?? call.raw?.result;
+  return {
+    name: type === "mcp" ? `${args?.providerIdentifier}: ${args?.toolName}` : type,
+    args,
+    output: result?.value ?? result?.success?.content ?? result,
+    failed: result?.status ? result.status !== "success" : Boolean(result?.error),
+    status: result?.status ?? "error",
+  };
+}
+
+const text = (value) => (typeof value === "string" ? value : JSON.stringify(value ?? null));
 
 // One run as OTLP spans. Attributes use Langfuse's names plus the OTel GenAI ones (gen_ai.*), so the
 // same body works for other OTLP backends.
@@ -198,6 +252,32 @@ function runSpans({ agent, run, repo, model, prompt, steps, source, usage, promp
     ...(error ? { status: { code: 2, message: error } } : {}),
   });
 
+  // Cursor reports usage per run, not per model call, so the totals get a span of their own at the end of
+  // the run instead of sitting on one model call. Langfuse reads tokens and cost on generations only, and
+  // ignored them on the root span (checked 2026-11-12), so this is a generation with no length.
+  const usageSpan =
+    usage &&
+    span(spanId("usage"), rootId, "Run usage", end, end, {
+      "langfuse.observation.type": "generation",
+      "langfuse.observation.model.name": model,
+      "gen_ai.request.model": model,
+      "gen_ai.operation.name": "chat",
+      "langfuse.observation.input": `Totals for the whole run, across ${steps.length} model calls. Cursor doesn't report tokens or cost per call.`,
+      "langfuse.observation.output": `${usage.usage.totalTokens} tokens, $${(usage.cost.rawCostCents / 100).toFixed(2)} model cost, $${(usage.cost.chargedCents / 100).toFixed(2)} charged`,
+      "langfuse.observation.metadata.usage_scope": "run",
+      "langfuse.observation.usage_details": {
+        input: usage.usage.inputTokens,
+        output: usage.usage.outputTokens,
+        cache_read_input_tokens: usage.usage.cacheReadTokens,
+        cache_creation_input_tokens: usage.usage.cacheWriteTokens,
+        total: usage.usage.totalTokens,
+      },
+      // rawCostCents is the model cost; chargedCents is what was billed (0 inside the plan's allowance).
+      "langfuse.observation.cost_details": { total: usage.cost.rawCostCents / 100 },
+      "gen_ai.usage.input_tokens": usage.usage.inputTokens,
+      "gen_ai.usage.output_tokens": usage.usage.outputTokens,
+    });
+
   const spans = [
     span(rootId, undefined, ROOT_NAME, start, end, {
       "langfuse.observation.type": "agent",
@@ -217,50 +297,38 @@ function runSpans({ agent, run, repo, model, prompt, steps, source, usage, promp
 
   steps.forEach((step, i) => {
     const stepId = spanId(`step:${i}`);
-    // Cursor reports usage per run, not per model call, so the run total goes on the last call.
-    const last = i === steps.length - 1 && usage;
+    // Cursor doesn't expose the full context sent to a model call. What's new in it is known: the prompt for the
+    // first call, and the previous call's tool results for the rest.
+    const input = i === 0 ? prompt : steps[i - 1].tools.map((call) => { const view = toolView(call); return `${view.name}: ${text(view.output)}`; }).join("\n\n");
     spans.push(
       span(stepId, rootId, step.name ?? `Model call ${i + 1}`, step.start, step.end, {
         "langfuse.observation.type": "generation",
         "langfuse.observation.model.name": model,
         "gen_ai.request.model": model,
-        "langfuse.observation.output": clip(step.thinking ? { thinking: step.thinking, text: step.text } : step.text),
+        "langfuse.observation.input": clip(input),
+        "langfuse.observation.output": clip([step.thinking && `Thinking: ${step.thinking}`, step.text].filter(Boolean).join("\n\n")),
+        "langfuse.observation.completion_start_time": step.firstToken && new Date(step.firstToken).toISOString(),
+        "langfuse.observation.metadata.thinking_ms": step.thinkingMs,
         "langfuse.observation.metadata.tool_calls": step.tools.length,
         "gen_ai.operation.name": "chat",
-        ...(last
-          ? {
-              "langfuse.observation.metadata.usage_scope": "run",
-              "langfuse.observation.usage_details": {
-                input: usage.usage.inputTokens,
-                output: usage.usage.outputTokens,
-                cache_read_input_tokens: usage.usage.cacheReadTokens,
-                cache_creation_input_tokens: usage.usage.cacheWriteTokens,
-                total: usage.usage.totalTokens,
-              },
-              // rawCostCents is the model cost; chargedCents is what was billed (0 inside the plan's allowance).
-              "langfuse.observation.cost_details": { total: usage.cost.rawCostCents / 100 },
-              "gen_ai.usage.input_tokens": usage.usage.inputTokens,
-              "gen_ai.usage.output_tokens": usage.usage.outputTokens,
-            }
-          : {}),
       }),
     );
     step.tools.forEach((call, j) => {
-      const name = call.type === "mcp" ? `${call.args?.providerIdentifier}: ${call.args?.toolName}` : call.type;
-      const failed = call.result?.status && call.result.status !== "success";
+      const { name, args, output, failed, status } = toolView(call);
       spans.push(
         span(spanId(`tool:${i}:${j}`), stepId, name, call.start, call.end, {
           "langfuse.observation.type": "tool",
-          "langfuse.observation.input": clip(call.args),
-          "langfuse.observation.output": clip(call.result?.value ?? call.result),
+          "langfuse.observation.input": clip(args),
+          "langfuse.observation.output": clip(output),
           ...(failed ? { "langfuse.observation.level": "ERROR" } : {}),
           "gen_ai.operation.name": "execute_tool",
           "gen_ai.tool.name": name,
-        }, failed ? call.result.status : undefined),
+        }, failed ? status : undefined),
       );
     });
   });
 
+  if (usageSpan) spans.push(usageSpan);
   return { kind, traceId, spans };
 }
 

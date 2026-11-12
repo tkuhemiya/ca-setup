@@ -14,6 +14,7 @@ module "review" {
   repo           = local.repo
   environment_id = local.environment_id
   prompt         = file("${path.module}/review.md")
+  mcp_servers    = ["executor"]
 }
 
 module "fix" {
