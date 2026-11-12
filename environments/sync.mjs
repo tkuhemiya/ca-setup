@@ -23,11 +23,12 @@ const only = positionals[0];
 const readText = (path) => readFileSync(ROOT + path, "utf8");
 const readJson = (path) => JSON.parse(readText(path));
 
-// Plain env vars for the Langfuse hooks; the keys come from .env as runtime secrets.
+// Plain env vars for the exporter; the keys come from .env as runtime secrets.
 const langfuseEnv = readJson("shared/langfuse.json");
 
 const secrets = [
   // Runtime secrets are redacted from agent output; plain env vars are not.
+  { name: "CURSOR_TOKEN", value: process.env.CURSOR_TOKEN, type: "runtime_secret" },
   { name: "LANGFUSE_PUBLIC_KEY", value: process.env.LANGFUSE_PUBLIC_KEY, type: "runtime_secret" },
   { name: "LANGFUSE_SECRET_KEY", value: process.env.LANGFUSE_SECRET_KEY, type: "runtime_secret" },
   ...Object.entries(langfuseEnv).map(([name, value]) => ({ name, value, type: "environment_variable" })),
@@ -41,6 +42,29 @@ function repoNames() {
     .filter((repo) => !only || repo === only);
 }
 
+// The exporter and the stop hook run on the agent's machine. These two scripts are the only files read from
+// observability/; install.sh registers the stop hook.
+const repoText = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+const agentTraceFiles = [
+  ["observability/export.mjs", "$HOME/.agent-trace/export.mjs"],
+  ["observability/stop-hook.mjs", "$HOME/.agent-trace/stop-hook.mjs"],
+];
+// The exporter labels a run as review or fix by matching its prompt against these files, so the build copies
+// them to ~/automations/ (the exporter reads them from its parent folder, which is $HOME there).
+const promptFiles = ["automations/prompts", "automations/repos"].flatMap((folder) =>
+  readdirSync(new URL(`../${folder}`, import.meta.url), { recursive: true })
+    .filter((path) => path.endsWith(".md"))
+    .map((path) => [`${folder}/${path}`, `$HOME/${folder}/${path}`]),
+);
+const agentTraceInstall = () =>
+  inline(
+    [
+      'mkdir -p "$HOME/.agent-trace"',
+      ...agentTraceFiles.map(([file, target]) => `echo ${Buffer.from(repoText(file)).toString("base64")} | base64 -d > "${target}"`),
+      ...promptFiles.map(([file, target]) => `mkdir -p "$(dirname "${target}")" && echo ${Buffer.from(repoText(file)).toString("base64")} | base64 -d > "${target}"`),
+    ].join("\n"),
+  );
+
 // Commands are sent base64-wrapped: Cursor re-quotes them, which breaks commands containing quotes.
 const inline = (script) => `echo ${Buffer.from(script).toString("base64")} | base64 -d | bash`;
 
@@ -51,13 +75,16 @@ const script = (own) => (Array.isArray(own) ? ["set -euo pipefail", ...own].join
 const withShared = (sharedScript, own, separator) =>
   [inline(readText(sharedScript)), own && inline(script(own))].filter(Boolean).join(separator);
 
-// repos/<owner>/<repo>/environment.json is sent as-is, with the shared setup run before its commands.
-function environmentJson(repo) {
+// Two environments per repo. automation-<repo> runs the automations: the stop hook that exports each run to
+// Langfuse, and the Cursor key. agents-<repo> is for people: only the repo's own commands, with no keys on the machine.
+// repos/<owner>/<repo>/environment.json holds the repo's own commands for both.
+function environmentJson(repo, automation) {
   const { install, start, ...rest } = readJson(`repos/${repo}/environment.json`);
+  if (!automation) return JSON.stringify({ ...rest, install: install && inline(script(install)), start: start && inline(script(start)) });
   return JSON.stringify({
     ...rest,
-    install: withShared("shared/install.sh", install, " && "), // build fails if either fails
-    start: withShared("shared/langfuse-start.sh", start, "; "), // Langfuse setup never blocks the repo's start
+    install: [agentTraceInstall(), withShared("shared/install.sh", install, " && ")].join(" && "), // build fails if any fails
+    start: withShared("shared/langfuse-start.sh", start, "; "), // saving the keys never blocks the repo's start
   });
 }
 
@@ -89,16 +116,36 @@ async function upsertEnvironment(name, repoUrl, environmentJson) {
   return created.id;
 }
 
-async function syncRepo(repo) {
-  console.log(`\n${repo}`);
+// Settings of the Langfuse plugin, which automation environments no longer install. Removed from both kinds.
+const retiredNames = ["LANGFUSE_TRACING_ENVIRONMENT", "LANGFUSE_TAGS", "LANGFUSE_CURSOR_CAPTURE_TOOL_OUTPUT", "LANGFUSE_CURSOR_CAPTURE_FILE_CONTENT", "LANGFUSE_CURSOR_MAX_CHARS"];
+// Keys and settings from earlier syncs, removed from agents- environments.
+const staleNames = [...secrets.map((secret) => secret.name), ...retiredNames];
 
-  const id = await upsertEnvironment(`agents-${repo.replace("/", "-")}`, `https://github.com/${repo}`, environmentJson(repo));
+async function deleteSecret(id, name) {
+  try {
+    await api("DELETE", `/v1/environments/${id}/secrets/${name}`);
+  } catch (error) {
+    if (!error.message.includes(" 404 ")) throw error;
+  }
+}
+
+async function syncRepo(repo, automation) {
+  const name = `${automation ? "automation" : "agents"}-${repo.replace("/", "-")}`;
+  console.log(`\n${name}`);
+
+  const id = await upsertEnvironment(name, `https://github.com/${repo}`, environmentJson(repo, automation));
   console.log(`  environment id: ${id}`);
 
-  for (const { name, value, type } of secrets) {
-    await api("PUT", `/v1/environments/${id}/secrets/${name}`, { value, type });
+  if (automation) {
+    for (const { name: secretName, value, type } of secrets) {
+      await api("PUT", `/v1/environments/${id}/secrets/${secretName}`, { value, type });
+    }
+    for (const secretName of retiredNames) await deleteSecret(id, secretName);
+    console.log(`  ${secrets.length} secrets set`);
+  } else {
+    for (const secretName of staleNames) await deleteSecret(id, secretName);
+    console.log("  keys removed");
   }
-  console.log(`  ${secrets.length} secrets set`);
 
   if (!flags["no-build"]) {
     const build = await api("POST", `/v1/environments/${id}/builds`);
@@ -110,7 +157,8 @@ async function syncRepo(repo) {
 if (flags["dry-run"]) {
   const [first] = repoNames();
   console.log("Would sync:", repoNames().join(", "));
-  console.log(`\nenvironmentJson for ${first}:`, JSON.stringify(JSON.parse(environmentJson(first)), null, 2));
+  console.log(`\nautomation-${first} environmentJson:`, JSON.stringify(JSON.parse(environmentJson(first, true)), null, 2));
+  console.log(`\nagents-${first} environmentJson:`, JSON.stringify(JSON.parse(environmentJson(first, false)), null, 2));
   process.exit(0);
 }
 
@@ -118,9 +166,10 @@ for (const key of ["CURSOR_TOKEN", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"]
   if (!process.env[key]) throw new Error(`Missing ${key} (see .env.example)`);
 }
 
-// Merge, so syncing a single repo keeps the other ids.
+// Merge, so syncing a single repo keeps the other ids. ids.json holds the automation- environments only.
 const ids = existsSync(ROOT + "ids.json") ? readJson("ids.json") : {};
 for (const repo of repoNames()) {
-  ids[repo] = await syncRepo(repo);
+  await syncRepo(repo, false);
+  ids[repo] = await syncRepo(repo, true);
   writeFileSync(ROOT + "ids.json", JSON.stringify(ids, Object.keys(ids).sort(), 2) + "\n");
 }

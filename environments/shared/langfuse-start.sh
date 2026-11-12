@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # Runs on every Cloud Agent boot (the environment `start` command), when runtime secrets exist.
-# Re-registers the Langfuse hooks (install.sh already did at build time) and writes the keys file. Never fatal.
+# Saves the keys for the stop hook. Never fatal.
 set -uo pipefail
 
-root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-cd "$root" || exit 0
-
-# Reads LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL from the environment.
-langfuse-cursor-hook setup --project . --hooks || echo "langfuse setup failed; agent runs untraced" >&2
-
-# Local-only ignore
-mkdir -p .git/info
-grep -qxF '.cursor/' .git/info/exclude 2>/dev/null || echo '.cursor/' >> .git/info/exclude
+# The stop hook may not inherit the runtime secrets, so it reads this file as a fallback.
+mkdir -p "$HOME/.agent-trace"
+node -e '
+  const fs = require("fs");
+  const keys = ["CURSOR_TOKEN", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL", "AGENT_TRACE_ENVIRONMENT"];
+  const env = Object.fromEntries(keys.filter((key) => process.env[key]).map((key) => [key, process.env[key]]));
+  fs.writeFileSync(process.env.HOME + "/.agent-trace/env.json", JSON.stringify(env), { mode: 0o600 });
+' || echo "agent trace env not saved; stop hook will use the hook's own environment" >&2
 exit 0

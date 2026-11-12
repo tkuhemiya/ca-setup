@@ -22,6 +22,12 @@ variable "environment_id" {
   description = "Environment to run in. Null = the repo's default environment."
 }
 
+variable "mcp_servers" {
+  type        = list(string)
+  default     = []
+  description = "Names of MCP servers already registered in Cursor to attach."
+}
+
 variable "allowed_users" {
   type        = list(string)
   default     = null # not [], the provider (0.8) reads an empty list back as null and fails the apply
@@ -54,5 +60,8 @@ resource "cursor_platform_workflow" "this" {
     user_allowlist = var.allowed_users
   }]
 
-  action = [{ pr_comment = { allow_inline_comments = false } }]
+  action = concat(
+    [{ pr_comment = { allow_inline_comments = false } }],
+    [for server in var.mcp_servers : { mcp = { server = server } }],
+  )
 }
