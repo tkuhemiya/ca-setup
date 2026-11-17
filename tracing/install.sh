@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs at build time, after sync.mjs has copied the exporter to ~/.agent-trace/ and before the repo's own
+# Runs at build time, after scripts/sync-environments.mjs has copied the exporter to ~/.agent-trace/ and before the repo's own
 # install command. Must be idempotent.
 set -euo pipefail
 

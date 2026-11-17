@@ -1,3 +1,5 @@
 .terraform/
 *.tfstate*
 .env
+# Written by scripts/sync-environments.mjs on every run.
+ids.json
