@@ -37,7 +37,7 @@ Sections marked **not retrieved** are the gaps listed at the end.
 
 | Family | Base | Auth | Plan limits | Used in this repo |
 |---|---|---|---|---|
-| Cloud Agents v1 | `https://api.cursor.com/v1` | Basic or Bearer | Personal keys work on Pro **[live]** | `sync.mjs`, `observability/export.mjs`, `enrich.mjs` |
+| Cloud Agents v1 | `https://api.cursor.com/v1` | Basic or Bearer | Personal keys work on Pro **[live]** | `scripts/sync-environments.mjs`, `observability/export.mjs`, `enrich.mjs` |
 | Cloud Agents v0 (legacy) | `https://api.cursor.com/v0` | Basic or Bearer | Personal keys work **[live]** | `export.mjs`, `enrich.mjs` |
 | Admin API | `https://api.cursor.com/teams/...` | Basic, team admin key | Some routes Enterprise only **[docs]** | `enrich.mjs` (usage events) |
 | Organization API | `https://api.cursor.com/organizations/...` | Basic, organization key | Organization admin | Terraform provider (groups) |
@@ -66,7 +66,7 @@ Two methods, used by different families:
 | HTTP Basic | API key as the username, empty password: `curl -u "$KEY:"` | Admin, Organization, Analytics, AI Code Tracking, Bugbot. Also accepted by Cloud Agents. |
 | Bearer | `Authorization: Bearer $KEY` | Cloud Agents. Origin uses its own tokens (section 12). |
 
-Both work for Cloud Agents. This repo uses Bearer **[repo]** (`sync.mjs`, `export.mjs`).
+Both work for Cloud Agents. This repo uses Bearer **[repo]** (`sync-environments.mjs`, `export.mjs`).
 
 ### Key types
 
@@ -307,10 +307,10 @@ An environment defines how an agent's machine is built and started. Its `environ
 |---|---|---|
 | `POST` | `/v1/environments` | Create. Returns `201`. |
 | `GET` | `/v1/environments` | List. |
-| `GET` | `/v1/environments/{id}` | Get, including `environmentJson`, `buildSettings`, `repoFile`, `versionId`. |
+| `GET` | `/v1/environments/{id}` | Get, including `buildSettings`, `repoFile`, `versionId`. The docs also list `environmentJson`, but it was missing from both of this repo's environments **[live, 2026-11-16]**. |
 | `PATCH` | `/v1/environments/{id}` | Update. Returns `204`. |
 | `DELETE` | `/v1/environments/{id}` | Delete. Irreversible. |
-| `GET` | `/v1/environments/{id}/history` | Config history. |
+| `GET` | `/v1/environments/{id}/history` | Config history, newest first. Each event has `environmentJson`, and `current: true` marks the saved config **[live, 2026-11-16]**. `scripts/sync-environments.mjs` compares against it. |
 | `GET` | `/v1/environments/{id}/builds` | List builds. |
 | `POST` | `/v1/environments/{id}/builds` | Start a build. Returns `202`. |
 | `GET` | `/v1/environments/{id}/builds/{buildId}` | Get a build. |
@@ -345,7 +345,7 @@ An environment defines how an agent's machine is built and started. Its `environ
 | `snapshotState` | `ACTIVE`, `REAP_REQUESTED`, `DELETED` |
 | `createdAt`, `updatedAt`, `completedAt` | ISO 8601 |
 
-**[observed]** Failure codes seen: `install_failed`, `dockerfile_contents_not_enabled`. Inline Dockerfiles (`build.dockerfileContents`) are gated on this account. Cursor re-quotes `install` and `start` strings, so wrap commands in base64 (see `environments/sync.mjs`). A failed build never replaces the active one. Right after a build starts, `GET .../builds/{id}` can return an empty body or `404` for a few seconds **[observed]**.
+**[observed]** Failure codes seen: `install_failed`, `dockerfile_contents_not_enabled`. Inline Dockerfiles (`build.dockerfileContents`) are gated on this account. Cursor re-quotes `install` and `start` strings, so wrap commands in base64 (see `scripts/sync-environments.mjs`). A failed build never replaces the active one. Right after a build starts, `GET .../builds/{id}` can return an empty body or `404` for a few seconds **[observed]**.
 
 **`environmentJson` network setting**: `egressAllowlist` replaces network access rather than adding to it **[observed]**. Leave it out unless you list every host a build needs.
 
@@ -398,6 +398,8 @@ Secret values are never returned. Secret versions carry `id` (`secv_...`), `name
 ### 5.10 Repositories
 
 `GET /v1/repositories` returns `{items: [{url}]}`. It returned 64 repositories in one response with no `nextCursor` **[live]**.
+
+It lists GitHub repositories only. GitLab, Bitbucket Cloud and Azure DevOps repositories are never listed, but agents and environments can still use them. Pass the repository URL as it appears on the host, such as `https://bitbucket.org/<workspace>/<repo>` **[docs, 2026-11-16]**. Bitbucket Server repositories fail a build with `bitbucket_server_not_enabled` **[docs, 2026-11-16]**.
 
 ### 5.11 Current user
 
@@ -788,7 +790,7 @@ Webhook signatures carry no key id. Try each active key, cache JWKS for 10 minut
 
 Cursor's **Automations** (`cursor_platform_workflow`) have no public REST reference. The Terraform provider talks to them over **Connect RPC** at `CURSOR_ENDPOINT` (default `https://api2.cursor.sh`) **[repo]**. This section is what the provider and this repo show. It is not a documented API, and nothing here probes it.
 
-Resource fields used in this repo's workflows **[repo]** (`automations/workflows/*/main.tf`):
+Resource fields used in this repo's workflows **[repo]** (`modules/automation/main.tf`):
 
 | Field | Notes |
 |---|---|
@@ -801,6 +803,8 @@ Resource fields used in this repo's workflows **[repo]** (`automations/workflows
 Trigger types in the provider: `git_pull_request`, `git_push`, `git_ci_completed`, `cron`, `slack`, `linear`, `webhook`, `microsoft_teams`, `microsoft_teams_channel_created`.
 
 Action types: `pr_comment`, `git_pr`, `request_reviewers`, `mcp`, `slack`, `read_slack`, `microsoft_teams`, `read_microsoft_teams`.
+
+Git hosts **[docs, 2026-11-16]**: source control triggers work with GitHub, GitLab and Bitbucket Cloud (`bitbucket.org`), not Bitbucket Server or Data Center. Bitbucket Cloud has the pull request triggers (draft opened, opened, pushed, merged, approved), push to branch, and top-level comment added. It has no label, inline review-comment or CI completed trigger. The provider's docs call `repos` "GitHub repos", but its source (0.8.0 and 0.9.0) names `bitbucket.org` as a known host and passes repo strings to the server as written. A bare `owner/repo` reads as GitHub, so write `bitbucket.org/<workspace>/<repo>`. Not yet applied against a Bitbucket repo from this setup. See `AGENTS.md`, "Bitbucket Cloud is supported".
 
 Provider behaviour **[repo]**: an empty `user_allowlist` comes back as `null`, so use `null` for "anyone". `max_mode` is always reported as `true`. Leaving it unset fails the apply, and setting it to `false` fails the plan.
 

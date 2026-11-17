@@ -18,8 +18,7 @@
 //   node observability/export.mjs --run <agent id>:<run id> --model <model> [--repo owner/repo]
 
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 
 const ROOT = new URL("../", import.meta.url).pathname;
@@ -101,21 +100,9 @@ async function runEvents(agentId, runId) {
     .map((event) => ({ type: event.event, ms: Number(event.id.split("-")[0]), data: JSON.parse(event.data) }));
 }
 
-// Prompt text -> which automation it belongs to, read from the prompt files in automations/.
-// repos/<owner>/<repo>/review.md -> { kind: "review", repo }; prompts/fix.md -> { kind: "fix" }.
-function promptIndex() {
-  const index = new Map();
-  for (const folder of ["automations/repos", "automations/prompts"]) {
-    // On an agent's machine only this folder is installed, so there are no prompt files to match.
-    if (!existsSync(ROOT + folder)) continue;
-    for (const path of readdirSync(ROOT + folder, { recursive: true })) {
-      if (!path.endsWith(".md")) continue;
-      const repo = folder.endsWith("repos") ? dirname(path) : undefined;
-      index.set(readFileSync(`${ROOT}${folder}/${path}`, "utf8").trim(), { kind: basename(path, ".md"), repo });
-    }
-  }
-  return index;
-}
+// Which automation a prompt belongs to. modules/automation ends every prompt with a line naming it.
+// A prompt without that line is an agent someone started by hand in one of our environments.
+const automationOf = (prompt) => prompt.match(/<!-- automation: (\S+) -->\s*$/)?.[1] ?? "manual";
 
 // Model calls with their thinking and text, and the tool calls each one made. The stream has no marker
 // for a call, so a call is whatever falls between two closing events: `tool-requests-listed` (the call
@@ -221,13 +208,11 @@ const text = (value) => (typeof value === "string" ? value : JSON.stringify(valu
 
 // One run as OTLP spans. Attributes use Langfuse's names plus the OTel GenAI ones (gen_ai.*), so the
 // same body works for other OTLP backends.
-function runSpans({ agent, run, repo, model, prompt, steps, source, usage, prompts }) {
+function runSpans({ agent, run, repo, model, prompt, steps, source, usage }) {
   const traceId = traceIdFor(run.id);
   const spanId = (label) => hash(`${traceId}:${label}`, 16);
   const rootId = spanId("root");
-  const automation = prompts.get(prompt.trim());
-  // A prompt that matches no file is an agent started by hand in one of our environments.
-  const kind = automation?.kind ?? "manual";
+  const kind = automationOf(prompt);
   const start = Date.parse(run.createdAt);
   const end = start + (run.durationMs ?? Date.parse(run.updatedAt) - start);
   // Langfuse v4 filters and groups each observation by its own copy of these, so every span carries
@@ -350,7 +335,7 @@ async function observations(params) {
 // (cursor.conversation_id on its root span), as does the model, which Cursor's API doesn't report.
 // Returns the runs in our environments that have settled.
 async function finishedRuns(from, settledBefore) {
-  const repoByEnvironment = new Map(Object.entries(JSON.parse(readFileSync(`${ROOT}environments/ids.json`, "utf8"))).map(([repo, id]) => [id, repo]));
+  const repoByEnvironment = new Map(Object.values(JSON.parse(readFileSync(`${ROOT}ids.json`, "utf8"))).map(({ id, repo }) => [id, repo]));
   const roots = await observations({ type: "AGENT", environment: "cloud-agent", fromStartTime: new Date(from).toISOString(), fields: "core,metadata" });
   const modelByAgent = new Map(roots.map((o) => [o.metadata?.["cursor.conversation_id"], o.metadata?.["cursor.model"]]).filter(([id]) => id?.startsWith("bc-")));
   const found = [];
@@ -401,13 +386,12 @@ async function namedRun(spec) {
     if (usage && previous && JSON.stringify(usage) === JSON.stringify(previous)) break;
   }
   const agent = await cursorApi(`/v1/agents/${agentId}`);
-  const repo = flags.repo ?? agent.repos?.[0]?.url?.replace(/^https:\/\/github\.com\//, "") ?? "unknown";
+  const repo = flags.repo ?? agent.repos?.[0]?.url?.replace(/^https:\/\/[^/]+\//, "") ?? "unknown";
   return { agent, run, repo, model: flags.model, usage };
 }
 
 const now = Date.now();
 const from = now - durationMs(flags.since);
-const prompts = promptIndex();
 const runs = flags.run ? [await namedRun(flags.run)] : await finishedRuns(from, now - durationMs(flags.settle));
 // Trace ids that already have our root span, so each run is written once. Runs can start before the
 // window, so look a day further back. A named run is written once by construction: `stop` fires once.
@@ -424,7 +408,7 @@ for (const { agent, run, repo, model, usage: known } of runs) {
     ? { source: "stream", prompt: events.find((e) => e.data.type === "user-message-appended")?.data.userMessage.text ?? "", steps: steps(events) }
     : { source: "conversation", ...(await fromConversation(agent, run)) };
   const usage = known ?? (await runUsage(agent.id, run.id));
-  const { kind, spans } = runSpans({ agent, run, repo, model, usage, prompts, ...content });
+  const { kind, spans } = runSpans({ agent, run, repo, model, usage, ...content });
   const body = { resourceSpans: [{ resource: { attributes: attributes({ "service.name": "ca-setup-export" }) }, scopeSpans: [{ scope: { name: "ca-setup-export" }, spans }] }] };
   const cost = usage ? `, ${usage.usage.totalTokens} tokens, $${(usage.cost.rawCostCents / 100).toFixed(2)}` : ", no usage";
   console.log(`${run.id}: ${kind} on ${repo}, ${spans.length} spans from the ${content.source}${cost}`);
