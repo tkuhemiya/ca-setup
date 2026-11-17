@@ -24,7 +24,8 @@ const { values: flags } = parseArgs({
 const readText = (path) => readFileSync(ROOT + path, "utf8");
 const readJson = (path) => JSON.parse(readText(path));
 
-// { host, owner }: where the repos live. A repo under another owner names itself in its environment.json.
+// { host, workspace }: where the repos live. The workspace is the GitHub user or org, or the Bitbucket workspace.
+// A repo in another workspace names itself in its environment.json.
 const settings = readJson("settings.json");
 
 // Runtime secrets are redacted from agent output; plain env vars are not. A secret's value comes from the
@@ -62,7 +63,7 @@ const tracing = {
 
 // What one repos/<folder>/environment.json asks Cursor for. Fields this script doesn't know go to Cursor as they are.
 function wanted(folder) {
-  const { repo = `${settings.owner}/${folder}`, install, start, variables = {}, secrets = [], tracing: traced = true, ...rest } = readJson(
+  const { repo = `${settings.workspace}/${folder}`, install, start, variables = {}, secrets = [], tracing: traced = true, ...rest } = readJson(
     `repos/${folder}/environment.json`,
   );
   const own = { install: install && inline(script(install)), start: start && inline(script(start)) };

@@ -9,7 +9,7 @@ Cursor Cloud Agent setup for our repos: the machine each agent runs on, and the 
 | `instructions/` | Prompt text shared between repos. |
 | `modules/automation/` | Turns one automation into one Cursor workflow per repo. |
 | `scripts/sync-environments.mjs` | Creates and updates the environments in Cursor. The Terraform provider can't. |
-| `settings.json` | The host and owner the repos live under. |
+| `settings.json` | The host and workspace the repos live under. |
 | `tracing/`, `observability/` | Send each run's trace to Langfuse. |
 
 Two tools apply the files. `sync-environments.mjs` manages environments and writes `ids.json`. Terraform manages workflows and reads `ids.json` to find each repo's environment.
@@ -62,7 +62,7 @@ module "review" {
 }
 ```
 
-Each repo in `repos` gets its own workflow, named `review (<owner>/<repo>)`, running in that repo's environment.
+Each repo in `repos` gets its own workflow, named `review (<workspace>/<repo>)`, running in that repo's environment.
 
 | Input | Value |
 |---|---|
@@ -84,7 +84,7 @@ A `cron` or `webhook` automation still runs once per repo. Each repo's webhook h
 | `variables` | Plain values, such as `{"NODE_ENV": "test"}`. They are committed. |
 | `secrets` | A list of names, such as `["DATABASE_URL"]`. Sync reads each value from the variable `<REPO>_<NAME>` in its own environment, for example `TYPST_EDITOR_DATABASE_URL`. Set it as a secured variable in CI, or in `.env` on a laptop. Cursor redacts secrets from agent output. |
 | `tracing` | `false` leaves out the stop hook and the Cursor and Langfuse keys. Defaults to `true`. |
-| `repo` | `owner/name`, when the repo is not `<owner in settings.json>/<folder name>`. |
+| `repo` | `<workspace>/<name>`, when the repo is not `<workspace in settings.json>/<folder name>`. |
 
 Any other field from [Cursor's environment.json](https://cursor.com/docs/cloud-agent/setup) is sent to Cursor as it is.
 
@@ -92,7 +92,7 @@ With tracing on, sync sets `CURSOR_TOKEN`, the `LANGFUSE_*` names and `AGENT_TRA
 
 ## How sync behaves
 
-Sync finds each environment by name (`automation-<owner>-<repo>`), reads what Cursor has, and changes only what differs. Running it again never creates a duplicate.
+Sync finds each environment by name (`automation-<workspace>-<repo>`), reads what Cursor has, and changes only what differs. Running it again never creates a duplicate.
 
 - **Variables.** Sync sends every variable on every run, because Cursor never returns a value. It deletes any variable that no file asks for, so set variables in the files and not in the dashboard.
 - **Builds.** Sync starts a build when the environment's commands changed, or a variable was added or removed. A build that fails is discarded, and agents keep using the last good build.

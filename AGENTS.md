@@ -23,7 +23,7 @@ Agents get this wrong because the Terraform provider's docs describe every git t
 
 Not checked yet:
 
-- Nothing in this setup has run against a Bitbucket repo. The host now comes from `settings.json`: sync builds `https://<host>/<owner>/<repo>`, and `modules/automation` writes `<host>/<owner>/<repo>` in triggers for any host but GitHub. Both were only planned against GitHub repos.
+- Nothing in this setup has run against a Bitbucket repo. The host now comes from `settings.json`: sync builds `https://<host>/<workspace>/<repo>`, and `modules/automation` writes `<host>/<workspace>/<repo>` in triggers for any host but GitHub. Both were only planned against GitHub repos.
 - Whether triggers fire with personal connections alone, before the workspace app is installed.
 - Which Bitbucket user an automation pushes as when a service account key created it.
 
@@ -75,9 +75,9 @@ In a plan, an environment that doesn't exist yet gets the id `pending`, so a pul
 
 ### One environment per repo, for automations only
 
-`repos/<repo>/environment.json` describes one environment, named `automation-<owner>-<repo>`. The name is unchanged from the old layout, so the two existing environments keep their ids.
+`repos/<repo>/environment.json` describes one environment, named `automation-<workspace>-<repo>`. The name is unchanged from the old layout, so the two existing environments keep their ids.
 
-The folder name is the repo name. The owner and host come from `settings.json`, because at work every repo is in one Bitbucket workspace. A repo under another owner sets `"repo": "owner/name"` in its `environment.json`.
+The folder name is the repo name. The host and workspace come from `settings.json`, because at work every repo is in one Bitbucket workspace. The key is `workspace`, not `owner`, because Cursor's API already uses `owner` for `personal` or `team` (`CURSOR_ENVIRONMENT_OWNER`). On GitHub the workspace is the user or org. A repo in another workspace sets `"repo": "<workspace>/<name>"` in its `environment.json`.
 
 Until 2026-11-16 sync also kept a keyless `agents-<owner>-<repo>` environment for people. The owner dropped that: this repo sets up environments for automations only. The two `agents-` environments still exist in Cursor and nothing manages them. Check one thing before deleting them: with only the `automation-` environment saved for a repo, an agent a person starts on that repo may resolve to it, with tracing on and the Cursor key on the machine. Its run would be labelled `manual`.
 
